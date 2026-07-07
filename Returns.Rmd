@@ -1,0 +1,491 @@
+---
+title: "Untitled"
+author: "Shah"
+date: "2026-06-18"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# =============================================================
+# PLFS 2019-20: Returns to Education — Data Cleaning Pipeline
+# Files used: PERFV_2019-20.csv, PERRV_2019-20.csv
+# =============================================================
+
+# ---- 1. Load packages ----
+library(data.table)   # fast read/write for large CSVs
+library(tidyverse)    # cleaning, wrangling
+
+setwd("D:/Projects (ongoing)/Returns to Education")
+
+# ---- 2. Read raw files (fast, handles 100MB+ files well) ----
+perfv <- fread("D:/Projects (ongoing)/Returns to Education/CSV_PLFS_19_20/PERFV_2019-20.csv", na.strings = c("", "NA"))
+perrv <- fread("D:/Projects (ongoing)/Returns to Education/CSV_PLFS_19_20/PERRV_2019-20.csv", na.strings = c("", "NA"))
+
+dim(perfv)   # ~418,297 x 129
+dim(perrv)   # ~523,163 x 104
+
+# ---- 3. Select and rename only the variables we need ----
+# (column names differ slightly between FV and RV — map both to common names)
+
+perfv_sel <- perfv %>%
+  select(
+    state       = state_per_fv,
+    sector      = b1q3_per_fv,
+    sex         = b4q5_per_fv,
+    age         = b4q6_per_fv,
+    edu_general = b4q8_per_fv,
+    edu_years   = b4q10_per_fv,
+    cws_status  = b6q5_per_fv,
+    industry    = b6q6_per_fv,
+    wage        = b6q9_per_fv,
+    weight      = MULT_per_fv
+  ) %>%
+  mutate(visit_type = "FV")
+
+perrv_sel <- perrv %>%
+  select(
+    state       = state_per_rv,
+    sector      = b1q3_per_rv,
+    sex         = b4q5_per_rv,
+    age         = b4q6_per_rv,
+    edu_general = b4q8_per_rv,
+    edu_years   = b4q10_per_rv,
+    cws_status  = b6q5_per_rv,
+    industry    = b6q6_per_rv,
+    wage        = b6q9_per_rv,
+    weight      = MULT_per_rv
+  ) %>%
+  mutate(visit_type = "RV")
+
+# ---- 4. Stack (combine) both visits into one dataset ----
+plfs_combined <- bind_rows(perfv_sel, perrv_sel)
+
+cat("Combined rows before any filtering:", nrow(plfs_combined), "\n")
+
+# ---- 5. Type conversion ----
+# Some columns may load as character due to blanks; force numeric
+plfs_combined <- plfs_combined %>%
+  mutate(
+    state       = as.numeric(state),
+    sector      = as.numeric(sector),
+    sex         = as.numeric(sex),
+    age         = as.numeric(age),
+    edu_general = as.numeric(edu_general),
+    edu_years   = as.numeric(edu_years),
+    cws_status  = as.numeric(cws_status),
+    wage        = as.numeric(wage),
+    weight      = as.numeric(weight)
+  )
+
+# ---- 6. Filter to wage/salaried employees only ----
+# CWS code 31 = Regular salaried/wage employee (the only group with
+# valid monthly earnings data in b6q9, per official PLFS manual)
+plfs_wage <- plfs_combined %>%
+  filter(cws_status == 31)
+
+cat("Rows after CWS==31 filter:", nrow(plfs_wage), "\n")
+
+# ---- 7. Apply standard sample restrictions ----
+plfs_clean <- plfs_wage %>%
+  filter(
+    !is.na(wage), wage > 0,            # valid positive earnings
+    !is.na(edu_years),                  # valid education info
+    !is.na(age),
+    age >= 15, age <= 65,                # working-age population
+    sex %in% c(1, 2)                     # drop third-gender (data too sparse for separate analysis)
+  )
+
+cat("Rows after sample restrictions:", nrow(plfs_clean), "\n")
+
+# ---- 8. Construct model variables ----
+plfs_final <- plfs_clean %>%
+  mutate(
+    # Dependent variable
+    log_wage = log(wage),
+
+    # Mincer potential experience
+    experience    = age - edu_years - 6,
+    experience_sq = experience^2,
+
+    # Dummies
+    male  = ifelse(sex == 1, 1, 0),
+    urban = ifelse(sector == 2, 1, 0),
+
+    # Readable education category (for descriptive tables/checks)
+    edu_level_label = case_when(
+      edu_general == 1  ~ "Not literate",
+      edu_general %in% c(2,3,4) ~ "Literate, no formal schooling",
+      edu_general == 5  ~ "Below primary",
+      edu_general == 6  ~ "Primary",
+      edu_general == 7  ~ "Middle",
+      edu_general == 8  ~ "Secondary",
+      edu_general == 10 ~ "Higher secondary",
+      edu_general == 11 ~ "Diploma/certificate",
+      edu_general == 12 ~ "Graduate",
+      edu_general == 13 ~ "Postgraduate+",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  # Drop implausible experience (negative experience = data entry issue
+  # or someone still very young relative to reported education years)
+  filter(experience >= 0, experience <= 50)
+
+cat("Final analysis sample:", nrow(plfs_final), "\n")
+
+# ---- 9. Quick sanity checks ----
+summary(plfs_final$wage)
+summary(plfs_final$edu_years)
+summary(plfs_final$experience)
+table(plfs_final$male)
+table(plfs_final$urban)
+table(plfs_final$edu_level_label)
+
+# Check for any remaining missing values in key model variables
+plfs_final %>%
+  select(log_wage, edu_years, experience, experience_sq, male, urban, state) %>%
+  summarise(across(everything(), ~sum(is.na(.))))
+
+# ---- 10. Save cleaned dataset for analysis stage ----
+saveRDS(plfs_final, "plfs_2019_20_clean.rds")
+fwrite(plfs_final, "plfs_2019_20_clean.csv")
+
+cat("\n=== Cleaning complete ===\n")
+cat("Final sample size:", nrow(plfs_final), "observations\n")
+cat("Saved to: plfs_2019_20_clean.rds / .csv\n")
+
+# ---- Additional cleaning: trim implausible wage values ----
+# Drop near-zero wages (likely data/coding artifacts, not real earnings)
+plfs_trimmed <- plfs_final %>%
+  filter(wage >= 500)   # ₹500/month is a generous lower bound; anything below
+                         # is not a credible regular-salary observation
+
+# Winsorize (cap) extreme top earners at 99th percentile to reduce leverage
+# of a small number of outliers, while keeping them in the sample
+wage_99 <- quantile(plfs_trimmed$wage, 0.99)
+plfs_trimmed <- plfs_trimmed %>%
+  mutate(
+    wage_capped = pmin(wage, wage_99),
+    log_wage_capped = log(wage_capped)
+  )
+
+cat("Rows before trim:", nrow(plfs_final), "\n")
+cat("Rows after trim:", nrow(plfs_trimmed), "\n")
+cat("99th percentile wage cap:", wage_99, "\n")
+
+saveRDS(plfs_trimmed, "plfs_2019_20_clean_trimmed.rds")
+fwrite(plfs_trimmed, "plfs_2019_20_clean_trimmed.csv")
+
+# =============================================================
+# PLFS 2019-20: Mincer Earnings Function — Regression Analysis
+# =============================================================
+
+library(tidyverse)
+library(stargazer)
+library(sandwich)
+library(lmtest)
+
+# ---- Load cleaned, trimmed data ----
+plfs <- readRDS("plfs_2019_20_clean_trimmed.rds")
+
+# Use log_wage_capped as primary dependent variable (winsorized)
+# log_wage (uncapped) reserved for robustness check later
+
+# ---- Model 1: Basic Mincer (education only) ----
+model1 <- lm(log_wage_capped ~ edu_years, data = plfs)
+
+# ---- Model 2: Classic Mincer (+ experience) ----
+model2 <- lm(log_wage_capped ~ edu_years + experience + experience_sq,
+             data = plfs)
+
+# ---- Model 3: Extended (+ gender, sector) ----
+model3 <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+               male + urban,
+             data = plfs)
+
+# ---- Model 4: Full model with state fixed effects ----
+model4 <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+               male + urban + factor(state),
+             data = plfs)
+
+# ---- Comparison table ----
+stargazer(model1, model2, model3, model4,
+          type = "html",
+          title = "Mincer Earnings Function — PLFS 2019-20",
+          dep.var.labels = "Log Monthly Wage (winsorized at 99th pctile)",
+          covariate.labels = c("Years of Education", "Experience",
+                               "Experience²", "Male", "Urban"),
+          omit = "factor(state)",
+          add.lines = list(c("State Fixed Effects", "No","No","No","Yes")),
+          omit.stat = c("f","ser"),
+          digits = 4,
+          out="Comparison Table.html",
+          align=TRUE)
+
+# ---- Key result: % return per year of education ----
+cat("\n--- RETURNS TO EDUCATION ---\n")
+cat("Model 1 (basic):   ", round((exp(coef(model1)["edu_years"]) - 1) * 100, 2), "%\n")
+cat("Model 2 (+exp):    ", round((exp(coef(model2)["edu_years"]) - 1) * 100, 2), "%\n")
+cat("Model 3 (+gender/sector):", round((exp(coef(model3)["edu_years"]) - 1) * 100, 2), "%\n")
+cat("Model 4 (+state FE):", round((exp(coef(model4)["edu_years"]) - 1) * 100, 2), "%\n")
+
+# ---- Robustness check: same model on uncapped log_wage ----
+model4_uncapped <- lm(log_wage ~ edu_years + experience + experience_sq +
+                        male + urban + factor(state), data = plfs)
+cat("\nModel 4 return using UNCAPPED wage (robustness check):",
+    round((exp(coef(model4_uncapped)["edu_years"]) - 1) * 100, 2), "%\n")
+
+# =============================================================
+# Heteroskedasticity check + Robust Standard Errors
+# =============================================================
+
+# Breusch-Pagan test
+bptest(model4)
+# If p < 0.05 (very likely with survey wage data), use robust SEs below
+
+# Robust SE (HC3) — recommended for cross-sectional wage data
+robust_se_model4 <- coeftest(model4, vcov = vcovHC(model4, type = "HC3"))
+print(robust_se_model4)
+
+# Side-by-side: default vs robust SE for key coefficient
+cat("\n--- Education coefficient: OLS default SE vs Robust SE ---\n")
+cat("Default SE: ", summary(model4)$coefficients["edu_years", "Std. Error"], "\n")
+cat("Robust SE:  ", robust_se_model4["edu_years", "Std. Error"], "\n")
+
+
+# =============================================================
+# PLFS 2019-20: Subgroup Analysis — Gender & Sector
+# =============================================================
+
+library(tidyverse)
+library(stargazer)
+library(sandwich)
+library(lmtest)
+
+plfs <- readRDS("plfs_2019_20_clean_trimmed.rds")
+
+# ---- Subgroup samples ----
+plfs_male   <- filter(plfs, male == 1)
+plfs_female <- filter(plfs, male == 0)
+plfs_rural  <- filter(plfs, urban == 0)
+plfs_urban  <- filter(plfs, urban == 1)
+
+cat("Sample sizes:\n")
+cat("Male:  ", nrow(plfs_male), "\n")
+cat("Female:", nrow(plfs_female), "\n")
+cat("Rural: ", nrow(plfs_rural), "\n")
+cat("Urban: ", nrow(plfs_urban), "\n")
+
+# ---- Gender-split models (mirrors Model 4: full controls + state FE) ----
+model_male <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+                    urban + factor(state),
+                  data = plfs_male)
+
+model_female <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+                      urban + factor(state),
+                    data = plfs_female)
+
+# ---- Sector-split models ----
+model_rural <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+                     male + factor(state),
+                   data = plfs_rural)
+
+model_urban <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+                     male + factor(state),
+                   data = plfs_urban)
+
+# ---- Comparison table (state FE omitted from display for readability) ----
+stargazer(model_male, model_female, model_rural, model_urban,
+          type = "html",
+          title = "Returns to Education by Gender and Sector",
+          column.labels = c("Male", "Female", "Rural", "Urban"),
+          dep.var.labels = "Log Monthly Wage (winsorized)",
+          covariate.labels = c("Years of Education", "Experience",
+                               "Experience²", "Urban", "Male"),
+          omit = "factor(state)",
+          add.lines = list(c("State Fixed Effects", "Yes","Yes","Yes","Yes")),
+          omit.stat = c("f","ser"),
+          digits = 4,
+          out="Subgroup Comparison Table.html",
+          align=TRUE)
+
+# ---- Extract and compare the headline number across subgroups ----
+get_return <- function(model, var = "edu_years") {
+  round((exp(coef(model)[var]) - 1) * 100, 2)
+}
+
+cat("\n--- RETURNS TO EDUCATION BY SUBGROUP ---\n")
+cat("Male:   ", get_return(model_male), "%\n")
+cat("Female: ", get_return(model_female), "%\n")
+cat("Rural:  ", get_return(model_rural), "%\n")
+cat("Urban:  ", get_return(model_urban), "%\n")
+cat("Pooled (Model 4, for reference): 10.25 %\n")
+
+# =============================================================
+# Formal test: is the male-female difference in returns
+# statistically significant? (Chow-style test via interaction)
+# =============================================================
+
+model_interact <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+                        urban + male + edu_years:male + factor(state),
+                      data = plfs)
+
+summary(model_interact)$coefficients["edu_years:male", ]
+
+cat("\nInterpretation: if edu_years:male is significant, the gender\n",
+    "gap in RETURNS (not just levels) is statistically real, not\n",
+    "just sampling noise between the two separate regressions.\n")
+
+# Same logic for rural/urban
+model_interact_sector <- lm(log_wage_capped ~ edu_years + experience + experience_sq +
+                               male + urban + edu_years:urban + factor(state),
+                             data = plfs)
+
+summary(model_interact_sector)$coefficients["edu_years:urban", ]
+
+# ---- Robust SEs for the interaction models (heteroskedasticity persists) ----
+coeftest(model_interact, vcov = vcovHC(model_interact, type = "HC3"))["edu_years:male", ]
+coeftest(model_interact_sector, vcov = vcovHC(model_interact_sector, type = "HC3"))["edu_years:urban", ]
+
+
+
+
+library(ggplot2)
+library(dplyr)
+
+# ---- Chart 1: Progressive models ----
+model_returns <- data.frame(
+  model = factor(c("Model 1\n(Basic)", "Model 2\n(+Experience)",
+                    "Model 3\n(+Gender/Sector)", "Model 4\n(+State FE)"),
+                  levels = c("Model 1\n(Basic)", "Model 2\n(+Experience)",
+                             "Model 3\n(+Gender/Sector)", "Model 4\n(+State FE)")),
+  return_pct = c(8.00, 10.62, 10.43, 10.25),
+  highlight = c("No","No","No","Yes")
+)
+
+ggplot(model_returns, aes(x = model, y = return_pct, fill = highlight)) +
+  geom_col(width = 0.55) +
+  geom_text(aes(label = paste0(return_pct, "%")), vjust = -0.5, fontface = "bold", size = 4.5) +
+  scale_fill_manual(values = c("No" = "grey60", "Yes" = "#1f3a5f"), guide = "none") +
+  labs(title = "Returns to Education Stabilize as Controls Are Added",
+       y = "Return to one additional year of education (%)", x = NULL) +
+  ylim(0, 14) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"))
+ggsave("chart1_Progressive_Models.png", width = 9, height = 5.8, dpi = 200)
+
+# ---- Chart 2: Gender & sector subgroup bars ----
+subgroup_df <- data.frame(
+  category = factor(c("Male","Female","Rural","Urban"), levels = c("Male","Female","Rural","Urban")),
+  return_pct = c(10.02, 12.31, 8.92, 10.99),
+  facet = c("Gender","Gender","Sector","Sector")
+)
+
+ggplot(subgroup_df, aes(x = category, y = return_pct, fill = category)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_hline(yintercept = 10.25, linetype = "dashed", color = "grey40") +
+  geom_text(aes(label = paste0(return_pct, "%")), vjust = -0.5, fontface = "bold") +
+  facet_wrap(~facet, scales = "free_x") +
+  scale_fill_manual(values = c("Male"="#1f3a5f","Female"="#e76f51","Rural"="#2a9d8f","Urban"="#e9c46a")) +
+  labs(title = "Returns to Education Vary by Gender and Sector",
+       y = "Return to education (%)", x = NULL) +
+  theme_minimal(base_size = 13)
+  
+ggsave("chart2_Gender_and_sector_subgroups.png", width = 9, height = 5.8, dpi = 200)
+
+# ---- Chart 3: Wage-experience profile ----
+exp_seq <- seq(0, 50, length.out = 200)
+beta_exp  <- coef(model4)["experience"]
+beta_exp2 <- coef(model4)["experience_sq"]
+profile_df <- data.frame(
+  experience = exp_seq,
+  wage_growth_pct = (exp(beta_exp * exp_seq + beta_exp2 * exp_seq^2) - 1) * 100
+)
+
+ggplot(profile_df, aes(x = experience, y = wage_growth_pct)) +
+  geom_area(fill = "#1f3a5f", alpha = 0.08) +
+  geom_line(color = "#1f3a5f", linewidth = 1.2) +
+  labs(title = "Wages Rise with Experience, at a Decreasing Rate",
+       x = "Years of Potential Experience", y = "Wage Growth Relative to Entry (%)") +
+  theme_minimal(base_size = 13)
+ggsave("chart3_wage_experience_profile.png", width = 9, height = 5.8, dpi = 200)  
+
+# ---- Chart 4: Wage premiums (male, urban) ----
+premium_df <- data.frame(
+  group = factor(c("Urban wage\npremium","Male wage\npremium"),
+                  levels = c("Urban wage\npremium","Male wage\npremium")),
+  premium_pct = c((exp(coef(model4)["urban"]) - 1) * 100,
+                   (exp(coef(model4)["male"]) - 1) * 100)
+)
+
+ggplot(premium_df, aes(x = group, y = premium_pct, fill = group)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = paste0("+", round(premium_pct,1), "%")), hjust = -0.1, fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = c("Urban wage\npremium" = "#2a9d8f", "Male wage\npremium" = "#1f3a5f")) +
+  labs(title = "Unexplained Wage Premiums (Model 4)",
+       y = "Wage premium, holding education/experience/state constant (%)", x = NULL) +
+  theme_minimal(base_size = 13)
+  
+ggsave("chart4_wage_premiums.png", width = 9, height = 5.8, dpi = 200)
+
+# =============================================================
+# PLFS 2019-20: Quantile Regression — Returns to Education Across Wage Distribution
+# =============================================================
+
+library(quantreg)
+library(purrr)
+library(dplyr)
+
+quantiles <- c(0.10, 0.25, 0.50, 0.75, 0.90)
+
+# Fit one quantile at a time, store results in a list
+qr_fits <- map(quantiles, function(q) {
+  rq(log_wage_capped ~ edu_years + experience + experience_sq + male + urban,
+     tau = q, method = "pfn", data = plfs)
+})
+
+names(qr_fits) <- paste0("Q", quantiles*100)
+
+# Get asymptotic (nid) SEs for each fit separately
+qr_summaries <- map(qr_fits, ~ summary(.x, se = "nid"))
+
+# Extract edu_years coefficient + SE from each
+edu_results <- map_df(seq_along(quantiles), function(i) {
+  coefs <- qr_summaries[[i]]$coefficients
+  data.frame(
+    quantile  = quantiles[i],
+    estimate  = coefs["edu_years", "Value"],
+    std_error = coefs["edu_years", "Std. Error"]
+  )
+}) %>%
+  mutate(
+    return_pct = (exp(estimate) - 1) * 100,
+    ci_lower   = (exp(estimate - 1.96 * std_error) - 1) * 100,
+    ci_upper   = (exp(estimate + 1.96 * std_error) - 1) * 100
+  )
+
+print(edu_results)
+
+# ---- Chart: Returns to Education Across Wage Distribution ----
+ggplot(edu_results, aes(x = quantile, y = return_pct)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), fill = "#1f3a5f", alpha = 0.13) +
+  geom_line(color = "#1f3a5f", linewidth = 1.3) +
+  geom_point(color = "#1f3a5f", size = 3.5) +
+  geom_hline(yintercept = 10.25, linetype = "dashed", color = "#e76f51", linewidth = 1.2) +
+  annotate("text", x = 0.88, y = 10.65, label = "OLS mean: 10.25%",
+           color = "#e76f51", fontface = "bold", size = 3.8) +
+  scale_x_continuous(breaks = c(0.10, 0.25, 0.50, 0.75, 0.90),
+                     labels = c("Q10\n(Low earners)","Q25","Q50\n(Median)","Q75","Q90\n(High earners)")) +
+  labs(title = "Returns to Education Across the Wage Distribution",
+       x = "Wage Quantile", y = "Return to one year of education (%)") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("chart5_quantile_regression.png", width = 9, height = 5.8, dpi = 200)
