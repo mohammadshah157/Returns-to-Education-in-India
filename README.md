@@ -175,7 +175,6 @@ Overall, the findings indicate that **education is a robust and economically sig
 ├── chart3_wage_experience_profile.png
 ├── chart4_wage_premiums.png
 ├── README.md
-└── LICENSE
 ```
 
 ---
