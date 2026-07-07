@@ -44,6 +44,7 @@ The project estimates four increasingly comprehensive Mincer wage equations.
 \ln(Wage)=\beta_0+\beta_1Education+\epsilon
 \]
 
+
 ---
 
 ### Model 2 — Human Capital Specification
