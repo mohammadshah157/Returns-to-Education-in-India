@@ -40,9 +40,9 @@ The project estimates four increasingly comprehensive Mincer wage equations.
 
 ### Model 1 — Baseline
 
-\[
-\ln(Wage)=\beta_0+\beta_1Education+\epsilon
-\]
+$$
+\ln(\text{Wage}) = \beta_0 + \beta_1 \text{Education} + \epsilon
+$$
 
 
 ---
